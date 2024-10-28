@@ -1,0 +1,33 @@
+[package]
+name = "vrl-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+tikv-jemallocator = "0.6.0"
+
+# VRL related dependencies
+## enrichment
+arc-swap = { version = "1.5.1", default-features = false }
+dyn-clone = { version = "1.0.9", default-features = false }
+chrono = { version = "0.4.19", default-features = false }
+
+vrl = { version = "0.19.0"}
+log = "0.4.14"
+
+# wierd issue with 'alloc' missing from pest's Parser macro used in vrl requires reimporting with std to work...
+pest = { version = "2.2.1", default-features = false, features = ["std"] }
+pest_derive = { version = "2.2.1", default-features = false, features = [
+  "std",
+] }
+
+
+
+chrono-tz = "0.10.0"
+anyhow = "1"
+regex = "1"
+
+
+[dev-dependencies]
+paste = "1.0.15"

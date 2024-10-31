@@ -1,11 +1,4 @@
-use vrl::*;
-use log::{debug, warn};
 use vrl::prelude::*;
-use vrl::compiler::compile;
-use std::time::Instant;
-
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn split(value: Value, limit: Value, pattern: Value) -> Resolved {
     let string = value.try_bytes_utf8_lossy()?;
@@ -13,25 +6,24 @@ fn split(value: Value, limit: Value, pattern: Value) -> Resolved {
         x if x < 0 => 0,
         x => x as usize,
     };
-    let result = match pattern {
-        Value::Regex(pattern) => pattern.splitn(string.as_ref(), limit).collect::<Vec<_>>(),
+    match pattern {
+        Value::Regex(pattern) => Ok(pattern
+            .splitn(string.as_ref(), limit)
+            .collect::<Vec<_>>()
+            .into()),
         Value::Bytes(bytes) => {
             let pattern = String::from_utf8_lossy(&bytes);
-            string.splitn(limit, pattern.as_ref()).collect::<Vec<_>>()
-        }
-        value => {
-            return Err(ValueError::Expected {
-                got: value.kind(),
-                expected: Kind::regex() | Kind::bytes(),
-            }
-            .into())
-        }
-    };
 
-    if result.len() == 1 && result[0].is_empty() {
-        Ok(Value::Array(vec![]))
-    } else {
-        Ok(result.into())
+            Ok(string
+                .splitn(limit, pattern.as_ref())
+                .collect::<Vec<_>>()
+                .into())
+        }
+        value => Err(ValueError::Expected {
+            got: value.kind(),
+            expected: Kind::regex() | Kind::bytes(),
+        }
+        .into()),
     }
 }
 
@@ -124,75 +116,101 @@ impl FunctionExpression for SplitFn {
 }
 
 fn main() {
-    let mut functions = vrl::stdlib::all();
-    // Replace function with identifier "split" by our new function
-    let split = functions.iter_mut().find(|f| f.identifier() == "split").unwrap();
-    *split = Box::new(Split) as _;
-    // println!("functions: {:?}", functions);
-    let program = "split(\"a,b,c\", \",\")";
-    let start = Instant::now();
-    match compile(&program, &functions) {
-        Ok(result) => {
-            debug!(
-                "Compiled a vrl program ({}), took {:?}",
-                program
-                    .lines()
-                    .into_iter()
-                    .skip(1)
-                    .next()
-                    .unwrap_or("expansion"),
-                start.elapsed()
-            );
-            // (*cache_ref).put(program.to_string(), Ok(result.program));
-            if result.warnings.len() > 0 {
-                warn!("{:?}", result.warnings);
-            }
-            // match (*cache_ref).get(program) {
-            //     Some(compiled) => match compiled {
-            //         Ok(compiled) => Ok(compiled),
-            //         Err(e) => {
-            //             return Err(anyhow!(e.clone()));
-            //         }
-            //     },
-            //     None => unreachable!(),
-            // }
-        }
-        Err(_diagnostics) => {
-            // let msg = Formatter::new(&program, diagnostics).to_string();
-            // (*cache_ref).put(program.to_string(), Err(msg.clone()));
-            // Err(anyhow!(msg))
-        }
-    }
-
-    // print test of split with value "a,b,c" and pattern ","
-    let test = crate::split("a,b,c".into(), Value::Integer(3), ",".into());
-    println!("test: {:?}", test);
+    println!();
 }
 
 #[cfg(test)]
 #[allow(clippy::trivial_regex)]
 mod test {
     use super::*;
-    use paste::paste;
+    use vrl::value;
 
-    macro_rules! split_test {
-        ($name:ident, $input:expr, $pattern:expr, $expected:expr) => {
-            paste! {
-                #[test]
-                fn [<split_ $name>]() {
-                    let limit = $expected.len();
-                    let expression = crate::split(
-                        $input.into(), Value::Integer(limit as i64), $pattern.into(),
-                    ).unwrap();
-                    let expected: Vec<Value> = $expected.iter().map(|&s: &&str| s.into()).collect();
-                    assert_eq!(expression, Value::Array(expected));
-                }
-            }
-        };
-    }
+    test_function![
+        split => Split;
 
-    split_test!(empty, "", ",", [""; 0]);
-    split_test!(single, "foo", ",", ["foo"]);
-    split_test!(long, "This is a long string.", " ", ["This", "is", "a", "long", "string."]);
+        empty {
+            args: func_args![value: "",
+                             pattern: " "
+            ],
+            want: Ok(value!([""])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
 
+        single {
+            args: func_args![value: "foo",
+                             pattern: " "
+            ],
+            want: Ok(value!(["foo"])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        long {
+            args: func_args![value: "This is a long string.",
+                             pattern: " "
+            ],
+            want: Ok(value!(["This", "is", "a", "long", "string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        regex {
+            args: func_args![value: "This is a long string",
+                             pattern: Value::Regex(regex::Regex::new(" ").unwrap().into()),
+                             limit: 2
+            ],
+            want: Ok(value!(["This", "is a long string"])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        non_space {
+            args: func_args![value: "ThisaisAlongAstring.",
+                             pattern: Value::Regex(regex::Regex::new("(?i)a").unwrap().into())
+            ],
+            want: Ok(value!(["This", "is", "long", "string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        unicode {
+             args: func_args![value: "˙ƃuᴉɹʇs ƃuol ɐ sᴉ sᴉɥ┴",
+                              pattern: " "
+             ],
+             want: Ok(value!(["˙ƃuᴉɹʇs", "ƃuol", "ɐ", "sᴉ", "sᴉɥ┴"])),
+             tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+         }
+
+        limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: 2
+            ],
+            want: Ok(value!(["This", "is a long string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        over_length_limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: 2000
+            ],
+            want: Ok(value!(["This", "is", "a", "long", "string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        zero_limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: 0
+            ],
+            want: Ok(value!([])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        negative_limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: -1
+            ],
+            want: Ok(value!([])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+    ];
 }

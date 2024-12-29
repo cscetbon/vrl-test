@@ -3,30 +3,30 @@ use vrl::prelude::*;
 use vrl::compiler::compile;
 use std::time::Instant;
 
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-fn split(value: Value, pattern: Value) -> Resolved {
+fn split(value: Value, limit: Value, pattern: Value) -> Resolved {
     let string = value.try_bytes_utf8_lossy()?;
-    let result = match pattern {
-        Value::Regex(pattern) => pattern.splitn(string.as_ref(), value.to_string().len()).collect::<Vec<_>>(),
+    let limit = match limit.try_integer()? {
+        x if x < 0 => 0,
+        x => x as usize,
+    };
+    match pattern {
+        Value::Regex(pattern) => Ok(pattern
+            .splitn(string.as_ref(), limit)
+            .collect::<Vec<_>>()
+            .into()),
         Value::Bytes(bytes) => {
             let pattern = String::from_utf8_lossy(&bytes);
-            string.splitn(value.to_string().len(), pattern.as_ref()).collect::<Vec<_>>()
-        }
-        value => {
-            return Err(ValueError::Expected {
-                got: value.kind(),
-                expected: Kind::regex() | Kind::bytes(),
-            }
-            .into())
-        }
-    };
 
-    if result.len() == 1 && result[0].is_empty() {
-        Ok(Value::Array(vec![]))
-    } else {
-        Ok(result.into())
+            Ok(string
+                .splitn(limit, pattern.as_ref())
+                .collect::<Vec<_>>()
+                .into())
+        }
+        value => Err(ValueError::Expected {
+            got: value.kind(),
+            expected: Kind::regex() | Kind::bytes(),
+        }
+        .into()),
     }
 }
 
@@ -49,6 +49,11 @@ impl Function for Split {
                 keyword: "pattern",
                 kind: kind::BYTES | kind::REGEX,
                 required: true,
+            },
+            Parameter {
+                keyword: "limit",
+                kind: kind::INTEGER,
+                required: false,
             },
         ]
     }
@@ -81,10 +86,12 @@ impl Function for Split {
     ) -> Compiled {
         let value = arguments.required("value");
         let pattern = arguments.required("pattern");
+        let limit = arguments.optional("limit").unwrap_or(expr!(999_999_999));
 
         Ok(SplitFn {
             value,
             pattern,
+            limit,
         }
         .as_expr())
     }
@@ -94,14 +101,16 @@ impl Function for Split {
 pub(crate) struct SplitFn {
     value: Box<dyn Expression>,
     pattern: Box<dyn Expression>,
+    limit: Box<dyn Expression>,
 }
 
 impl FunctionExpression for SplitFn {
     fn resolve(&self, ctx: &mut Context) -> Resolved {
         let value = self.value.resolve(ctx)?;
+        let limit = self.limit.resolve(ctx)?;
         let pattern = self.pattern.resolve(ctx)?;
 
-        split(value, pattern)
+        split(value, limit, pattern)
     }
 
     fn type_def(&self, _: &state::TypeState) -> TypeDef {
@@ -138,7 +147,7 @@ fn main() {
     }
 
     // print test of split with value "a,b,c" and pattern ","
-    let test = crate::split("a,b,c".into(), ",".into());
+    let test = crate::split("a,b,c".into(), ",".into(), 999_999_999.into());
     println!("test: {:?}", test);
 }
 
@@ -146,25 +155,95 @@ fn main() {
 #[allow(clippy::trivial_regex)]
 mod test {
     use super::*;
-    use paste::paste;
+    use vrl::value;
+    // use vrl::prelude::test_function;
 
-    macro_rules! split_test {
-        ($name:ident, $input:expr, $pattern:expr, $expected:expr) => {
-            paste! {
-                #[test]
-                fn [<split_ $name>]() {
-                    let expression = crate::split(
-                        $input.into(), $pattern.into(),
-                    ).unwrap();
-                    let expected: Vec<Value> = $expected.iter().map(|&s: &&str| s.into()).collect();
-                    assert_eq!(expression, Value::Array(expected));
-                }
-            }
-        };
-    }
+    test_function![
+        split => Split;
 
-    split_test!(empty, "", ",", [""; 0]);
-    split_test!(single, "foo", ",", ["foo"]);
-    split_test!(long, "This is a long string.", " ", ["This", "is", "a", "long", "string."]);
+        empty {
+            args: func_args![value: "",
+                             pattern: " "
+            ],
+            want: Ok(value!([""])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
 
+        single {
+            args: func_args![value: "foo",
+                             pattern: " "
+            ],
+            want: Ok(value!(["foo"])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        long {
+            args: func_args![value: "This is a long string.",
+                             pattern: " "
+            ],
+            want: Ok(value!(["This", "is", "a", "long", "string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        regex {
+            args: func_args![value: "This is a long string",
+                             pattern: Value::Regex(regex::Regex::new(" ").unwrap().into()),
+                             limit: 2
+            ],
+            want: Ok(value!(["This", "is a long string"])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        non_space {
+            args: func_args![value: "ThisaisAlongAstring.",
+                             pattern: Value::Regex(regex::Regex::new("(?i)a").unwrap().into())
+            ],
+            want: Ok(value!(["This", "is", "long", "string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        unicode {
+             args: func_args![value: "˙ƃuᴉɹʇs ƃuol ɐ sᴉ sᴉɥ┴",
+                              pattern: " "
+             ],
+             want: Ok(value!(["˙ƃuᴉɹʇs", "ƃuol", "ɐ", "sᴉ", "sᴉɥ┴"])),
+             tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+         }
+
+        limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: 2
+            ],
+            want: Ok(value!(["This", "is a long string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        over_length_limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: 2000
+            ],
+            want: Ok(value!(["This", "is", "a", "long", "string."])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        zero_limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: 0
+            ],
+            want: Ok(value!([])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+
+        negative_limit {
+            args: func_args![value: "This is a long string.",
+                             pattern: " ",
+                             limit: -1
+            ],
+            want: Ok(value!([])),
+            tdef: TypeDef::array(Collection::from_unknown(Kind::bytes())),
+        }
+    ];
 }

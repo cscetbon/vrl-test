@@ -1,7 +1,11 @@
 use log::{debug, warn};
+use serde_json::json;
+use std::collections::BTreeMap;
+use vrl::compiler::runtime::Runtime;
+use vrl::compiler::TimeZone;
+use vrl::compiler::{compile, TargetValue};
 use vrl::prelude::*;
-use vrl::compiler::compile;
-use std::time::Instant;
+use vrl::value::{Secrets, Value};
 
 fn split(value: Value, limit: Value, pattern: Value) -> Resolved {
     let string = value.try_bytes_utf8_lossy()?;
@@ -119,36 +123,109 @@ impl FunctionExpression for SplitFn {
 }
 
 fn main() {
-    let mut functions = vrl::stdlib::all();
+    // Initialize the logger
+    env_logger::init();
+    let functions = vrl::stdlib::all();
+    // let mut functions = vrl::stdlib::all();
     // Replace function with identifier "split" by our new function
-    let split = functions.iter_mut().find(|f| f.identifier() == "split").unwrap();
-    *split = Box::new(Split) as _;
+    // let split = functions
+    //     .iter_mut()
+    //     .find(|f| f.identifier() == "split")
+    //     .unwrap();
+    // *split = Box::new(Split) as _;
     // println!("functions: {:?}", functions);
-    let program = "split(\"a,b,c\", \",\")";
-    let start = Instant::now();
-    match compile(&program, &functions) {
-        Ok(result) => {
-            debug!(
-                "Compiled a vrl program ({}), took {:?}",
-                program
-                    .lines()
-                    .into_iter()
-                    .skip(1)
-                    .next()
-                    .unwrap_or("expansion"),
-                start.elapsed()
-            );
-            if result.warnings.len() > 0 {
-                warn!("{:?}", result.warnings);
-            }
+    let program = r#"
+        # Remove some fields
+        del(.foo)
+
+        # Add a timestamp
+        .timestamp = now()
+
+        # Parse HTTP status code into local variable
+        http_status_code = parse_int!(.http_status)
+        del(.http_status)
+
+        # Add status
+        if http_status_code >= 200 && http_status_code <= 299 {
+            .status = "success"
+        } else {
+            .status = "error"
         }
-        Err(_diagnostics) => {
+    "#;
+
+    println!("program: {:?}", program);
+
+    // Compile the VRL script
+    let program = compile(&program, &functions)
+        .map_err(|diagnostics| {
+            println!("Error compiling program: {:?}", diagnostics);
+            diagnostics
+        })
+        .unwrap();
+
+    if !program.warnings.is_empty() {
+        warn!("{:?}", program.warnings);
+    }
+
+    let mut runtime = Runtime::default();
+    let timezone = TimeZone::default();
+
+    let event = Value::from(json!(
+        {
+            "message": "Hello VRL",
+            "foo": "delete me",
+            "http_status": "200"
+        }
+    ));
+
+    println!("{:?}", event.clone());
+
+    let mut target_value = TargetValue {
+        value: event,
+        metadata: Value::Object(BTreeMap::new()),
+        secrets: Secrets::new(),
+    };
+
+    match runtime.resolve(&mut target_value, &program.program, &timezone) {
+        Ok(_) => {
+            debug!("Resolved event: {:?}", target_value.value);
+        }
+        Err(e) => {
+            println!("Error resolving event: {:?}", e);
         }
     }
 
+    // // Convert the transformed Value back into a Rust struct
+    // let transformed: Input = serde_json::from_value(message_value.to_json()?)?;
+
+    // let program = r#"
+    //     .e = split("a,b,c", ",");
+    // "#;
+    // let start = Instant::now();
+    // match compile(&program, &functions) {
+    //     Ok(result) => {
+    //         debug!(
+    //             "Compiled a vrl program ({}), took {:?}",
+    //             program
+    //                 .lines()
+    //                 .into_iter()
+    //                 .skip(1)
+    //                 .next()
+    //                 .unwrap_or("expansion"),
+    //             start.elapsed()
+    //         );
+    //         if result.warnings.len() > 0 {
+    //             warn!("{:?}", result.warnings);
+    //         }
+    //     }
+    //     Err(_diagnostics) => {
+    //         println!("Error compiling program: {:?}", _diagnostics);
+    //     }
+    // }
+
     // print test of split with value "a,b,c" and pattern ","
-    let test = crate::split("a,b,c".into(), ",".into(), 999_999_999.into());
-    println!("test: {:?}", test);
+    // let test = crate::split("a,b,c".into(), ",".into(), 999_999_999.into());
+    // println!("test: {:?}", test);
 }
 
 #[cfg(test)]
